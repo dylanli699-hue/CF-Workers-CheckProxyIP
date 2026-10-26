@@ -31,7 +31,39 @@
 - 检测逻辑已从 `demo/Check_Proxy.js` 移植进 `_worker.js`
 - `/check` 会访问 `ipv4.090227.xyz` 和 `ipv6.090227.xyz` 作为出口探针，用于判断候选 ProxyIP 的 IPv4 / IPv6 出口能力
 
+## 本 Fork 的改动
+
+本仓库基于 `cmliu/CF-Workers-CheckProxyIP`，保持官方页面、解析、路由与字段兼容，仅做以下稳定性增强：
+
+1. **探针串行执行**：先 IPv4，再 IPv6，避免候选同时处理两条 TLS 握手。
+2. **瞬态失败重试**：`ServerHello`、超时、连接关闭等错误可重试，默认最多 3 次。
+3. **退避可配置**：默认 500ms、1000ms，可通过变量调整。
+4. **探针目标可替换**：通过 `PROBE_IPV4_URL` / `PROBE_IPV6_URL` 指向自建探针；未配置或为空时回退作者默认目标。
+5. **失败证据保留**：每个探针返回 `attempts`，发生重试时带 `retried: true`。
+
+以上改动不改变官方 `/check` 返回字段，新增字段均为附加信息。
+
 ## 环境变量
+
+| 变量名 | 说明 | 默认 | 必需 |
+| --- | --- | --- | --- |
+| `BEIAN` | 自定义页面页脚 HTML | 官方默认 | 否 |
+| `API_HOST` | 页面 `/check` 与 `/cdn-cgi/trace` 的请求主机 | 页面同源 | 否 |
+| `PROBE_IPV4_URL` | IPv4 探针完整 URL 或主机名；空值回退作者目标 | `https://ipv4.090227.xyz/` | 否 |
+| `PROBE_IPV6_URL` | IPv6 探针完整 URL 或主机名；空值回退作者目标 | `https://ipv6.090227.xyz/` | 否 |
+| `PROBE_RETRY_ATTEMPTS` | 单探针最多尝试次数，范围 1–10 | `3` | 否 |
+| `PROBE_RETRY_BASE_MS` | 退避基数，单位毫秒，范围 0–10000 | `500` | 否 |
+| `PROBE_RETRY_MAX_MS` | 单次退避上限，单位毫秒，范围 0–30000 | `5000` | 否 |
+
+退避公式：
+
+```text
+waitMs = min(PROBE_RETRY_BASE_MS * (attempt + 1), PROBE_RETRY_MAX_MS)
+```
+
+默认最多 3 次尝试，退避为 500ms、1000ms，最坏等待 1500ms（不含探测本身耗时）。
+
+## 官方原有变量
 
 当前源码只读取以下环境变量：
 

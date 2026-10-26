@@ -57,7 +57,7 @@ export default {
 		const apiBase = resolveApiBase(env.API_HOST, url);
 
 		if (url.pathname === '/check') {
-			return handleCheckProxyRequest(request);
+			return handleCheckProxyRequest(request, env);
 		} else if (url.pathname === '/resolve') {
 			const proxyip = url.searchParams.get('proxyip');
 			if (!proxyip) {
@@ -5687,20 +5687,51 @@ const CHECK_RESPONSE_HEADERS = {
 // - 访问 ipv4.090227.xyz 看返回的出口 IP
 // - 访问 ipv6.090227.xyz 看返回的出口 IP
 // 最终是否“支持 IPv4/IPv6”取决于探针返回的出口 IP 文本，不是候选代理地址本身。
-const PROBE_TARGETS = [
+const DEFAULT_PROBE_TARGETS = [
 	['ipv4', 'ipv4.090227.xyz', '/'],
 	['ipv6', 'ipv6.090227.xyz', '/'],
-].map(([name, host, path]) => ({
-	name,
-	host,
-	request: enc.encode(
-		`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nAccept: application/json, text/plain, */*\r\nAccept-Language: en-US,en;q=0.9\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n`
-	),
-}));
+];
+
+function makeProbeTarget(name, value, fallbackHost) {
+	const rawValue = typeof value === 'string' ? value.trim() : '';
+	const raw = rawValue || `https://${fallbackHost}/`;
+	let parsed;
+	try {
+		parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+	} catch {
+		parsed = new URL(`https://${fallbackHost}/`);
+	}
+	if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) {
+		parsed = new URL(`https://${fallbackHost}/`);
+	}
+	const authority = parsed.host;
+	const path = `${parsed.pathname || '/'}${parsed.search || ''}`;
+	return {
+		name,
+		host: authority,
+		serverName: parsed.hostname,
+		request: enc.encode(
+			`GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nAccept: application/json, text/plain, */*\r\nAccept-Language: en-US,en;q=0.9\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n`
+		),
+	};
+}
+
+function getProbeTargets(env) {
+	return [
+		makeProbeTarget('ipv4', env?.PROBE_IPV4_URL, DEFAULT_PROBE_TARGETS[0][1]),
+		makeProbeTarget('ipv6', env?.PROBE_IPV6_URL, DEFAULT_PROBE_TARGETS[1][1]),
+	];
+}
 
 function parsePositiveInt(value, fallback) {
 	const parsed = Number.parseInt(`${value ?? ''}`, 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoundedInt(value, fallback, min, max) {
+	const parsed = Number.parseInt(`${value ?? ''}`, 10);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.min(Math.max(parsed, min), max);
 }
 
 function concatBytes(chunks) {
@@ -5764,7 +5795,7 @@ function getExitFamily(result) {
 	return null;
 }
 
-async function handleCheckProxyRequest(req) {
+async function handleCheckProxyRequest(req, env) {
 	if (req.method === 'OPTIONS') {
 		return new Response(null, {
 			status: 204,
@@ -5820,8 +5851,7 @@ async function handleCheckProxyRequest(req) {
 					candidate = { raw: rawCandidate, hostname, port: Number(port) || defaultPort };
 				}
 
-				const probeResults = await Promise.all(
-					PROBE_TARGETS.map(async (target) => {
+				const probeTarget = async (target) => {
 						let socket = null;
 						let tlsClient = null;
 
@@ -5855,7 +5885,7 @@ async function handleCheckProxyRequest(req) {
 							connectMs = Date.now() - startedAt;
 
 							startedAt = Date.now();
-							tlsClient = new TlsClient(socket, { serverName: target.host, timeout: timeoutMs });
+							tlsClient = new TlsClient(socket, { serverName: target.serverName, timeout: timeoutMs });
 							await withTimeout(tlsClient.handshake(), timeoutMs, 'tls handshake');
 							tlsMs = Date.now() - startedAt;
 
@@ -5926,10 +5956,30 @@ async function handleCheckProxyRequest(req) {
 							try { tlsClient?.close(); } catch { }
 							try { if (!tlsClient) socket?.close(); } catch { }
 						}
-					})
-				);
+					};
 
-				// probeResults 顺序与 PROBE_TARGETS 一致：[0] => ipv4 探针结果, [1] => ipv6 探针结果
+				const probeTargets = getProbeTargets(env);
+				const retryAttempts = parseBoundedInt(env?.PROBE_RETRY_ATTEMPTS, 3, 1, 10);
+				const retryBaseMs = parseBoundedInt(env?.PROBE_RETRY_BASE_MS, 500, 0, 10000);
+				const retryMaxMs = parseBoundedInt(env?.PROBE_RETRY_MAX_MS, 5000, 0, 30000);
+				const probeResults = [];
+				const isTransientProbeError = (error) => /ServerHello|timed? ?out|timeout|closed|ECONN|reset|tcp connect/i.test(String(error || ''));
+				for (const target of probeTargets) {
+					let result = null;
+					let attempts = 0;
+					for (let attempt = 0; attempt < retryAttempts; attempt++) {
+						attempts++;
+						result = await probeTarget(target);
+						if (result.ok || !isTransientProbeError(result.error)) break;
+						const waitMs = Math.min(retryBaseMs * (attempt + 1), retryMaxMs);
+						if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+					}
+					result.attempts = attempts;
+					if (attempts > 1) result.retried = true;
+					probeResults.push(result);
+				}
+
+				// probeResults 顺序与 probeTargets 一致：[0] => ipv4 探针结果, [1] => ipv6 探针结果
 				const [ipv4, ipv6] = probeResults;
 				const hasIPv4 = getExitFamily(ipv4) === 'ipv4';
 				const hasIPv6 = getExitFamily(ipv6) === 'ipv6';
