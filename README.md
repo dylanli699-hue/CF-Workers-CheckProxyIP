@@ -248,6 +248,51 @@ Cloudflare Worker
 }
 ```
 
+### `GET|POST /scan`
+
+一次完成“反代域名解析 + 批量检测”，只接受一个域名。
+
+```http
+GET /scan?proxyip=ProxyIP.CMLiussss.net
+```
+
+```http
+POST /scan
+Content-Type: application/json
+
+{
+  "proxyip": "ProxyIP.CMLiussss.net",
+  "maxTargets": 50
+}
+```
+
+返回：
+
+```json
+{
+  "schema_version": "scan-v1",
+  "input": "ProxyIP.CMLiussss.net",
+  "resolved_total": 50,
+  "checked_total": 50,
+  "success_count": 49,
+  "unknown_count": 1,
+  "failed_count": 0,
+  "truncated": false,
+  "duration_ms": 4120,
+  "results": []
+}
+```
+
+规则：
+
+- 只接受一个 `proxyip`，传数组返回 400；
+- `proxyip` 可带任意合法端口（1–65535），例如 `proxy.example.com:8443`；
+- 未写端口时默认 `443`，API 不会强制固定端口；
+- `maxTargets` 默认 50，硬上限 100；
+- 超过上限返回 422，不静默截断；
+- `results[]` 与 `/check` 单条结果一致；
+- 不做跨域名合并、去重、地区过滤或评分。
+
 ### `GET /check?proxyip=...`
 
 检测候选 ProxyIP 是否可用。前端检测按钮调用的就是这个接口：默认走页面同源，设置 `API_HOST` 后改为请求该地址。
