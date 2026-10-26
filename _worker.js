@@ -56,9 +56,7 @@ export default {
 		// 仅用于前端 `/check` 与 `/cdn-cgi/trace` 的请求基地址，其它接口保持页面同源相对路径。
 		const apiBase = resolveApiBase(env.API_HOST, url);
 
-		if (url.pathname === '/scan') {
-			return handleScanRequest(request, env);
-		} else if (url.pathname === '/check') {
+		if (url.pathname === '/check') {
 			return handleCheckProxyRequest(request, env);
 		} else if (url.pathname === '/resolve') {
 			const proxyip = url.searchParams.get('proxyip');
@@ -5795,89 +5793,6 @@ function getExitFamily(result) {
 	// IPv6：当前逻辑只要包含 ":" 就视为 IPv6（未做完整 RFC 严格校验）。
 	if (exitIp.includes(':')) return 'ipv6';
 	return null;
-}
-
-async function handleScanRequest(req, env) {
-	if (req.method === 'OPTIONS') {
-		return new Response(null, { status: 204, headers: CHECK_RESPONSE_HEADERS });
-	}
-	if (req.method !== 'GET' && req.method !== 'POST') {
-		return checkJsonResponse({ ok: false, error: 'method_not_allowed' }, 405);
-	}
-
-	const url = new URL(req.url);
-	let body = {};
-	if (req.method === 'POST') {
-		try {
-			const text = await req.text();
-			body = text ? JSON.parse(text) : {};
-		} catch {
-			return checkJsonResponse({ ok: false, error: 'invalid_json' }, 400);
-		}
-	}
-
-	if (Array.isArray(body.proxyip) || Array.isArray(body.proxyips)) {
-		return checkJsonResponse({ ok: false, error: 'single_domain_only' }, 400);
-	}
-	const rawInput = body.proxyip ?? url.searchParams.get('proxyip');
-	const input = `${rawInput ?? ''}`.trim();
-	if (!input) return checkJsonResponse({ ok: false, error: 'missing_proxyip' }, 400);
-
-	// 免费版单次 invocation 只有 50 个子请求；8 个候选最坏 8×2×3=48，留安全余量。
-	const scanMaxTargets = parseBoundedInt(env?.SCAN_MAX_TARGETS, 8, 1, 8);
-	const maxTargets = parseBoundedInt(body.maxTargets ?? url.searchParams.get('maxTargets'), scanMaxTargets, 1, scanMaxTargets);
-	const timeoutMs = parsePositiveInt(body.timeoutMs ?? url.searchParams.get('timeoutMs'), DEFAULT_TIMEOUT_MS);
-	const readLimit = parsePositiveInt(body.readLimit ?? url.searchParams.get('readLimit'), DEFAULT_READ_LIMIT);
-
-	let resolved;
-	try {
-		resolved = await handleResolve(input);
-	} catch (error) {
-		return checkJsonResponse({ ok: false, error: 'resolve_failed', message: String(error?.message || error) }, 422);
-	}
-
-	const targets = [...new Set((Array.isArray(resolved) ? resolved : []).map((item) => `${item ?? ''}`.trim()).filter(Boolean))];
-	if (!targets.length) return checkJsonResponse({ ok: false, error: 'no_targets' }, 422);
-	if (targets.length > maxTargets) {
-		return checkJsonResponse({
-			ok: false,
-			error: 'target_limit_exceeded',
-			resolved_total: targets.length,
-			maxTargets
-		}, 422);
-	}
-
-	const startedAt = Date.now();
-	const checkReq = new Request(new URL('/check', url), {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ proxyips: targets, timeoutMs, readLimit })
-	});
-	const checkRes = await handleCheckProxyRequest(checkReq, env);
-	let results;
-	try {
-		results = await checkRes.json();
-	} catch {
-		return checkJsonResponse({ ok: false, error: 'check_failed' }, 502);
-	}
-	if (!checkRes.ok || !Array.isArray(results)) {
-		return checkJsonResponse({ ok: false, error: 'check_failed', detail: results }, 502);
-	}
-
-	const successCount = results.filter((item) => item?.success === true).length;
-	const unknownCount = results.filter((item) => item?.success !== true && item?.inferred_stack === 'unknown').length;
-	return checkJsonResponse({
-		schema_version: 'scan-v1',
-		input,
-		resolved_total: targets.length,
-		checked_total: results.length,
-		success_count: successCount,
-		unknown_count: unknownCount,
-		failed_count: results.length - successCount - unknownCount,
-		truncated: false,
-		duration_ms: Date.now() - startedAt,
-		results
-	});
 }
 
 async function handleCheckProxyRequest(req, env) {
