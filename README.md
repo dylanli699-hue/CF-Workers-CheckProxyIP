@@ -54,6 +54,7 @@
 | `PROBE_RETRY_ATTEMPTS` | 单探针最多尝试次数，范围 1–10 | `3` | 否 |
 | `PROBE_RETRY_BASE_MS` | 退避基数，单位毫秒，范围 0–10000 | `500` | 否 |
 | `PROBE_RETRY_MAX_MS` | 单次退避上限，单位毫秒，范围 0–30000 | `5000` | 否 |
+| `SCAN_MAX_TARGETS` | `/scan` 单次最多检测数，范围 1–8 | `8` | 否 |
 
 退避公式：
 
@@ -288,8 +289,9 @@ Content-Type: application/json
 - 只接受一个 `proxyip`，传数组返回 400；
 - `proxyip` 可带任意合法端口（1–65535），例如 `proxy.example.com:8443`；
 - 未写端口时默认 `443`，API 不会强制固定端口；
-- `maxTargets` 默认 50，硬上限 100；
+- `maxTargets` 默认 8，硬上限 8（`SCAN_MAX_TARGETS` 可调，范围 1–8）；
 - 超过上限返回 422，不静默截断；
+- 免费版单次 invocation 仅 50 子请求，`/scan` 只适合小批量/手工辅助；
 - `results[]` 与 `/check` 单条结果一致；
 - 不做跨域名合并、去重、地区过滤或评分。
 

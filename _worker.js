@@ -5823,7 +5823,9 @@ async function handleScanRequest(req, env) {
 	const input = `${rawInput ?? ''}`.trim();
 	if (!input) return checkJsonResponse({ ok: false, error: 'missing_proxyip' }, 400);
 
-	const maxTargets = parseBoundedInt(body.maxTargets ?? url.searchParams.get('maxTargets'), 50, 1, 100);
+	// 免费版单次 invocation 只有 50 个子请求；8 个候选最坏 8×2×3=48，留安全余量。
+	const scanMaxTargets = parseBoundedInt(env?.SCAN_MAX_TARGETS, 8, 1, 8);
+	const maxTargets = parseBoundedInt(body.maxTargets ?? url.searchParams.get('maxTargets'), scanMaxTargets, 1, scanMaxTargets);
 	const timeoutMs = parsePositiveInt(body.timeoutMs ?? url.searchParams.get('timeoutMs'), DEFAULT_TIMEOUT_MS);
 	const readLimit = parsePositiveInt(body.readLimit ?? url.searchParams.get('readLimit'), DEFAULT_READ_LIMIT);
 
